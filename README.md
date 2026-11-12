@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="reel-bot: Instagram reel link in, summary out, then chat about it" width="100%">
+</p>
+
 # reel-bot
 
 A small Telegram bot that turns an Instagram reel link into a written summary.
