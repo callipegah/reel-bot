@@ -1,7 +1,8 @@
 import asyncio, os, sys, tempfile
-os.environ.update(TELEGRAM_BOT_TOKEN="x", GROQ_API_KEY="x", ANTHROPIC_API_KEY="x",
+os.environ.update(TELEGRAM_BOT_TOKEN="x", STT_API_KEY="x", LLM_API_KEY="x",
                   ALLOWED_USER_ID="42", DATA_DIR=tempfile.mkdtemp())
 import bot
+_real_summarize = bot.summarize
 
 # links
 t = ("see https://www.instagram.com/reel/DAbC_123-x/?igsh=abc and "
@@ -49,3 +50,23 @@ async def tiny(p): return "Thank you."
 bot.transcribe = tiny
 asyncio.run(bot.process("CCC", "u", "en")); assert calls["args"][1] == ""
 print("ALL TESTS PASSED")
+
+# summarize() response parsing (OpenAI-compatible), network mocked
+import httpx
+def _mock(payload, status=200):
+    def h(request):
+        assert request.url.path.endswith("/chat/completions") and request.headers["authorization"] == "Bearer x"
+        return httpx.Response(status, json=payload)
+    return httpx.MockTransport(h)
+_Real = httpx.AsyncClient
+def _patch(payload, status=200):
+    bot.httpx.AsyncClient = lambda **kw: _Real(transport=_mock(payload, status), **kw)
+ok = {"choices": [{"message": {"role": "assistant", "content": " خلاصه "}}]}
+_patch(ok); assert asyncio.run(_real_summarize("c", "t", "fa")) == "خلاصه"
+_patch({"choices": [{"message": {"content": ""}}]})
+try: asyncio.run(_real_summarize("c", "t", "fa")); raise SystemExit("should fail")
+except bot.BotError: pass
+_patch({"error": "x"}, 401)
+try: asyncio.run(_real_summarize("c", "t", "fa")); raise SystemExit("should fail")
+except bot.BotError as e: assert "401" in str(e)
+print("LLM PARSING OK")

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Telegram bot: send an Instagram reel link, get a summary back.
 
-Flow: link -> yt-dlp (public reels only, NO Instagram login) -> ffmpeg -> Groq Whisper
-      -> Claude summary -> Telegram message.
+Flow: link -> yt-dlp (public reels only, NO Instagram login) -> ffmpeg -> Whisper (STT API)
+      -> LLM summary -> Telegram message.
 
 Config comes from environment variables (see .env.example). Nothing is hard-coded.
 """
@@ -33,11 +33,16 @@ def env(name: str, default: str | None = None) -> str:
 
 
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = env("GROQ_API_KEY")
-ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
+# Both services speak the OpenAI-compatible API, so any provider (GapGPT, Groq, OpenAI...) works.
+# Speech-to-text:
+STT_API_KEY = env("STT_API_KEY")
+STT_BASE_URL = env("STT_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+STT_MODEL = env("STT_MODEL", "whisper-large-v3-turbo")
+# Summary model:
+LLM_API_KEY = env("LLM_API_KEY")
+LLM_BASE_URL = env("LLM_BASE_URL", "https://api.gapgpt.app/v1").rstrip("/")
+LLM_MODEL = env("LLM_MODEL", "gemini-3.5-flash")
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID") or 0)  # 0 = setup mode (only /id works)
-CLAUDE_MODEL = env("CLAUDE_MODEL", "claude-sonnet-5-5")
-GROQ_MODEL = env("GROQ_MODEL", "whisper-large-v3-turbo")
 DEFAULT_LANG = env("DEFAULT_LANG", "fa")  # fa | en
 MAX_REEL_SECONDS = int(env("MAX_REEL_SECONDS", "900"))
 MAX_LINKS_PER_MESSAGE = 3
@@ -45,8 +50,8 @@ MAX_AUDIO_BYTES = 24 * 1024 * 1024  # Groq free tier upload limit is 25 MB
 DATA_DIR = Path(env("DATA_DIR", str(Path(__file__).resolve().parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+STT_URL = f"{STT_BASE_URL}/audio/transcriptions"
+LLM_URL = f"{LLM_BASE_URL}/chat/completions"
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)  # httpx logs URLs; keep tokens out of logs
@@ -171,16 +176,16 @@ def download_audio(url: str, workdir: Path) -> Path:
 async def transcribe(path: Path) -> str:
     async with httpx.AsyncClient(timeout=180) as client:
         r = await client.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            data={"model": GROQ_MODEL, "response_format": "json", "temperature": "0"},
+            STT_URL,
+            headers={"Authorization": f"Bearer {STT_API_KEY}"},
+            data={"model": STT_MODEL, "response_format": "json", "temperature": "0"},
             files={"file": ("audio.mp3", path.read_bytes(), "audio/mpeg")},
         )
     if r.status_code == 429:
-        raise BotError("Groq's free limit was reached. Try again in a minute.")
+        raise BotError("The transcription service is rate-limited. Try again in a minute.")
     if r.status_code != 200:
-        log.error("Groq error %s: %s", r.status_code, r.text[:300])
-        raise BotError(f"Transcription failed (Groq HTTP {r.status_code}).")
+        log.error("Transcription error %s: %s", r.status_code, r.text[:300])
+        raise BotError(f"Transcription failed (HTTP {r.status_code}). Check STT_API_KEY, STT_BASE_URL and STT_MODEL.")
     return (r.json().get("text") or "").strip()
 
 
@@ -213,18 +218,26 @@ PROMPTS = {
 
 async def summarize(caption: str, transcript: str, lang: str) -> str:
     user = f"<caption>\n{caption[:3000]}\n</caption>\n\n<transcript>\n{transcript[:30000]}\n</transcript>"
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=180) as client:
         r = await client.post(
-            ANTHROPIC_URL,
-            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": CLAUDE_MODEL, "max_tokens": 1200, "system": PROMPTS[lang],
-                  "messages": [{"role": "user", "content": user}]},
+            LLM_URL,
+            headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+            json={"model": LLM_MODEL,
+                  # generous: reasoning models (Gemini) spend part of this on hidden thinking
+                  "max_tokens": 6000,
+                  "messages": [{"role": "system", "content": PROMPTS[lang]},
+                               {"role": "user", "content": user}]},
         )
     if r.status_code != 200:
-        log.error("Claude error %s: %s", r.status_code, r.text[:300])
-        raise BotError(f"Summary failed (Claude API HTTP {r.status_code}). Check the API key and model name.")
-    return "".join(b.get("text", "") for b in r.json().get("content", [])).strip()
+        log.error("LLM error %s: %s", r.status_code, r.text[:300])
+        raise BotError(f"Summary failed (HTTP {r.status_code}). Check LLM_API_KEY, LLM_BASE_URL and LLM_MODEL.")
+    try:
+        text = (r.json()["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, ValueError, TypeError):
+        raise BotError("The summary model returned an unexpected response.")
+    if not text:
+        raise BotError("The summary model returned an empty answer. Try again.")
+    return text
 
 
 def fmt_duration(seconds: float | None) -> str:

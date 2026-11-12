@@ -21,15 +21,12 @@ sudo -u "$APP_USER" mkdir -p "$APP_DIR/data"
 sudo -u "$APP_USER" bash -c "cd $APP_DIR && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt"
 
 if [ ! -f "$APP_DIR/.env" ]; then
-  echo "Paste the keys (input is hidden)."
+  echo "Paste the keys (input is hidden). STT = speech-to-text key (Groq or GapGPT), LLM = summary key (GapGPT)."
   read -rsp "TELEGRAM_BOT_TOKEN: " TG; echo
-  read -rsp "GROQ_API_KEY: " GQ; echo
-  read -rsp "ANTHROPIC_API_KEY: " AN; echo
+  read -rsp "STT_API_KEY: " ST; echo
+  read -rsp "LLM_API_KEY: " LL; echo
   umask 077
-  sed -e "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=$TG|" \
-      -e "s|^GROQ_API_KEY=.*|GROQ_API_KEY=$GQ|" \
-      -e "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=$AN|" \
-      "$APP_DIR/.env.example" > "$APP_DIR/.env"
+  sed -e "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=$TG|"       -e "s|^STT_API_KEY=.*|STT_API_KEY=$ST|"       -e "s|^LLM_API_KEY=.*|LLM_API_KEY=$LL|"       "$APP_DIR/.env.example" > "$APP_DIR/.env"
   chown "$APP_USER:$APP_USER" "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
 fi

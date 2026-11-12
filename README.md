@@ -3,14 +3,14 @@
 A small Telegram bot that turns an Instagram reel link into a written summary.
 Send it a public reel link, get back the key points, claims and tools mentioned.
 
-**Flow:** reel link → `yt-dlp` (audio only) → `ffmpeg` → Groq Whisper (transcript) → Claude (summary) → Telegram message
+**Flow:** reel link → `yt-dlp` (audio only) → `ffmpeg` → Whisper API (transcript) → LLM (summary) → Telegram message
 
 ## Features
 
 - Public reels only. It **never logs in to Instagram**, so your account is not at risk.
 - Summaries in Persian (`fa`) or English (`en`), switch with `/lang fa` or `/lang en`.
 - Locked to a single Telegram user ID, so nobody else can spend your API keys.
-- Transcription runs on the Groq API, so it is light enough for a 2 GB server shared with other services.
+- Transcription and summaries run through OpenAI-compatible APIs (default: Groq Whisper + GapGPT/Gemini; any provider works), so it is light enough for a 2 GB server shared with other services.
 - Caches repeated links, deletes temporary files after each job, and shows clear errors (private reel, blocked IP, empty audio, rate limits).
 - Telegram long polling: no domain, webhook or open port needed.
 
@@ -34,7 +34,7 @@ systemctl daemon-reload && systemctl enable --now reel-bot
 journalctl -u reel-bot -f
 ```
 
-You need a Telegram bot token ([@BotFather](https://t.me/BotFather)), a [Groq](https://console.groq.com) API key and an [Anthropic](https://console.anthropic.com) API key.
+You need a Telegram bot token ([@BotFather](https://t.me/BotFather)), a speech-to-text key ([Groq](https://console.groq.com) free tier, or GapGPT) and an LLM key ([GapGPT](https://gapgpt.app), or any OpenAI-compatible provider). Provider, base URL and model are set in `.env` (see `.env.example`).
 
 ### Lock it to yourself
 
@@ -54,7 +54,7 @@ sudo -u reelbot /home/reelbot/reel-bot/venv/bin/pip install -U yt-dlp && systemc
 python test_bot.py
 ```
 
-The network parts (yt-dlp, Groq, Claude, Telegram) are mocked.
+The network parts (yt-dlp, speech-to-text, LLM, Telegram) are mocked.
 
 ## Security
 
@@ -69,5 +69,5 @@ The network parts (yt-dlp, Groq, Claude, Telegram) are mocked.
 
 - فقط ریل‌های عمومی. هیچ لاگینی به اینستاگرام انجام نمی‌شود.
 - فقط به user ID خودتان جواب می‌دهد.
-- رونویسی با Groq و خلاصه‌سازی با Claude؛ روی سرور فقط یک اسکریپت سبک اجرا می‌شود.
+- رونویسی (Whisper) و خلاصه‌سازی با APIهای سازگار با OpenAI (مثلاً GapGPT یا Groq)؛ روی سرور فقط یک اسکریپت سبک اجرا می‌شود.
 - راه‌اندازی: مراحل بالا را اجرا کنید، کلیدها را در `.env` بگذارید، یک بار `/id` بفرستید و عدد را در `ALLOWED_USER_ID` بنویسید.
