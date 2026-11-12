@@ -9,6 +9,7 @@ Send it a public reel link, get back the key points, claims and tools mentioned.
 
 - Public reels only. It **never logs in to Instagram**, so your account is not at risk.
 - Summaries in Persian (`fa`) or English (`en`), switch with `/lang fa` or `/lang en`.
+- Follow-up chat: after a summary, just type ("shorter", "explain more", "what is this tool?", "write a LinkedIn post") and it answers from the reel's full transcript. A new link starts a new conversation.
 - Locked to a single Telegram user ID, so nobody else can spend your API keys.
 - Transcription and summaries run through OpenAI-compatible APIs (default: Groq Whisper + GapGPT/Gemini; any provider works), so it is light enough for a 2 GB server shared with other services.
 - Caches repeated links, deletes temporary files after each job, and shows clear errors (private reel, blocked IP, empty audio, rate limits).
