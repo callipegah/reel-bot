@@ -123,3 +123,17 @@ sent.clear()
 asyncio.run(bot.process_submission(FakeApp(), sub))   # same codes again -> nothing new, silent
 assert sent == [], sent
 print("RADAR OK")
+
+# radar: the most-liked reel represents a group of near-duplicates
+metas2 = {
+    "PICK1AAAAA": {"timestamp": now - 1000, "description": 'Comment "ZED" and I will send the build', "uploader": "acct2", "duration": 40, "like_count": 3},
+    "PICK2BBBBB": {"timestamp": now - 90000, "description": 'Comment "ZED" and I will DM you the build', "uploader": "acct2", "duration": 40, "like_count": 787, "comment_count": 20},
+}
+bot.fetch_meta = lambda url: metas2[url.split("/reel/")[1].strip("/")]
+sent.clear()
+sub2 = bot.INBOX / "t2.json"
+sub2.write_text(bot.json.dumps({"handle": "acct2", "codes": list(metas2)}), encoding="utf-8")
+asyncio.run(bot.process_submission(FakeApp(), sub2))
+joined = " ".join(x[1] for x in sent)
+assert "PICK2BBBBB" in joined and "PICK1AAAAA" not in joined and "1 near-duplicate" in joined, joined
+print("PICK OK")

@@ -370,15 +370,20 @@ def is_duplicate(caption: str, others: list[str]) -> bool:
 
 
 async def process_submission(app: Application, path: Path) -> None:
-    """One inbox file = one account's new reel shortcodes. Summarize the fresh, distinct ones and send a digest."""
+    """One inbox file = one account's new reel shortcodes. Summarize the fresh, distinct ones and send a digest.
+
+    Among near-duplicate reels the most-liked one is kept as the representative."""
     data = json.loads(path.read_text(encoding="utf-8"))
     handle = re.sub(r"[^A-Za-z0-9._]", "", str(data.get("handle", "?")))[:30] or "?"
     codes = [c for c in data.get("codes", []) if re.fullmatch(r"[A-Za-z0-9_-]{5,20}", str(c))][:30]
     lang = get_lang(ALLOWED_USER_ID)
     cutoff = time.time() - MAX_AGE_DAYS * 86400
-    results: list[str] = []
+    prior = [r[0] for r in _db.execute(
+        "SELECT caption FROM seen_reels WHERE handle = ? AND ts > ?", (handle, cutoff)).fetchall()]
+
+    # 1) metadata for every unseen reel (cheap: no audio yet)
+    fetched: list[dict] = []
     failures: list[str] = []
-    skipped_old = skipped_dup = 0
     for code in codes:
         if _db.execute("SELECT 1 FROM seen_reels WHERE code = ?", (code,)).fetchone():
             continue
@@ -389,26 +394,35 @@ async def process_submission(app: Application, path: Path) -> None:
         except BotError as e:
             failures.append(f"❌ {url}\n{e}")
             continue
-        posted = meta.get("timestamp") or time.time()
         caption = meta.get("description") or meta.get("title") or ""
-        recent = [r[0] for r in _db.execute(
-            "SELECT caption FROM seen_reels WHERE handle = ? AND ts > ?", (handle, cutoff)).fetchall()]
+        posted = meta.get("timestamp") or time.time()
         _db.execute("INSERT OR IGNORE INTO seen_reels (code, handle, caption, ts) VALUES (?,?,?,?)",
                     (code, handle, caption, posted))
         _db.commit()
-        if posted < cutoff:
-            skipped_old += 1
-            continue
-        if is_duplicate(caption, recent):
+        fetched.append({"code": code, "url": url, "meta": meta, "caption": caption, "posted": posted,
+                        "score": (meta.get("like_count") or 0) + (meta.get("comment_count") or 0)})
+
+    # 2) drop old ones, then keep the best reel of each near-duplicate group
+    fresh = [x for x in fetched if x["posted"] >= cutoff]
+    skipped_old = len(fetched) - len(fresh)
+    chosen: list[dict] = []
+    skipped_dup = 0
+    for x in sorted(fresh, key=lambda x: x["score"], reverse=True):
+        if is_duplicate(x["caption"], prior + [c["caption"] for c in chosen]):
             skipped_dup += 1
-            continue
-        if len(results) >= MAX_PER_SUBMISSION:
-            continue
+        elif len(chosen) < MAX_PER_SUBMISSION:
+            chosen.append(x)
+    chosen.sort(key=lambda x: x["posted"], reverse=True)
+
+    # 3) transcribe + summarize the chosen ones
+    results: list[str] = []
+    for x in chosen:
         try:
-            results.append(await process(code, url, lang, 0, meta))
+            results.append(await process(x["code"], x["url"], lang, 0, x["meta"]))
         except BotError as e:
-            failures.append(f"❌ {url}\n{e}")
+            failures.append(f"❌ {x['url']}\n{e}")
         await asyncio.sleep(2)  # be gentle with Instagram and the API
+
     if not results and not failures:
         log.info("Radar @%s: nothing new", handle)
         return
