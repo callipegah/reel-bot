@@ -1,0 +1,26 @@
+[Unit]
+Description=Reel summary Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=reelbot
+Group=reelbot
+WorkingDirectory=/home/reelbot/reel-bot
+EnvironmentFile=/home/reelbot/reel-bot/.env
+ExecStart=/home/reelbot/reel-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+# Keep it from starving the website on a 2 GB server
+MemoryMax=500M
+CPUQuota=60%
+Nice=10
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/reelbot/reel-bot/data
+
+[Install]
+WantedBy=multi-user.target
