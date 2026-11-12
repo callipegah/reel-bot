@@ -34,7 +34,7 @@ bot.download_audio = fake_dl
 async def fake_tr(p): return "this is a long enough transcript about agents and tools"
 async def fake_su(c, t, l): calls["args"] = (c, t, l); return "summary text"
 bot.transcribe, bot.summarize = fake_tr, fake_su
-r = asyncio.run(bot.process("AAA", "https://www.instagram.com/reel/AAA/", "fa"))
+r = asyncio.run(bot.process("AAA", "https://www.instagram.com/reel/AAA/", "fa", 42))
 assert r.startswith("@someone · 0:42") and r.endswith("summary text"), r
 assert calls["args"][2] == "fa"
 calls.clear()
@@ -70,3 +70,25 @@ _patch({"error": "x"}, 401)
 try: asyncio.run(_real_summarize("c", "t", "fa")); raise SystemExit("should fail")
 except bot.BotError as e: assert "401" in str(e)
 print("LLM PARSING OK")
+
+# follow-up chat: context + history, LLM mocked
+ctx = bot.get_context(42)
+assert ctx and ctx["code"] == "AAA" and ctx["summary"] == "summary text", ctx
+seen = {}
+async def fake_llm(system, messages):
+    seen["system"], seen["messages"] = system, messages
+    return "shorter version"
+bot.llm = fake_llm
+assert asyncio.run(bot.chat(42, "make it shorter")) == "shorter version"
+assert "this is a long enough transcript" in seen["system"] and "summary text" in seen["system"]
+assert seen["messages"] == [{"role": "user", "content": "make it shorter"}]
+asyncio.run(bot.chat(42, "and now longer"))
+assert [m["content"] for m in seen["messages"]] == ["make it shorter", "shorter version", "and now longer"]
+assert asyncio.run(bot.chat(999, "hi")) is None          # no reel yet for this user
+for i in range(30): bot.add_history(42, "user", f"m{i}")
+assert len(bot.get_history(42)) == bot.HISTORY_LIMIT
+# a new reel resets the conversation; a cached reel also restores its context
+bot.set_context(42, "ZZZ", "c", "t", "s"); assert bot.get_history(42) == []
+r3 = asyncio.run(bot.process("AAA", "https://www.instagram.com/reel/AAA/", "fa", 42))
+assert r3 == r and bot.get_context(42)["code"] == "AAA"
+print("CHAT OK")
