@@ -3,3 +3,8 @@ data/
 venv/
 __pycache__/
 *.pyc
+
+# local watcher config
+pc/handles.txt
+pc/config.local.json
+pc/state.json

@@ -1,0 +1,2 @@
+# One Instagram account per line: handle, @handle, or profile URL. Lines starting with # are ignored.
+alassafi.ai

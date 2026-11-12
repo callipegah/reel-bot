@@ -7,6 +7,7 @@ Flow: link -> yt-dlp (public reels only, NO Instagram login) -> ffmpeg -> Whispe
 Config comes from environment variables (see .env.example). Nothing is hard-coded.
 """
 import asyncio
+import difflib
 import json
 import logging
 import os
@@ -49,6 +50,10 @@ MAX_LINKS_PER_MESSAGE = 3
 MAX_AUDIO_BYTES = 24 * 1024 * 1024  # Groq free tier upload limit is 25 MB
 DATA_DIR = Path(env("DATA_DIR", str(Path(__file__).resolve().parent / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+INBOX = DATA_DIR / "inbox"          # the PC watcher drops reel shortcodes here
+(INBOX / "failed").mkdir(parents=True, exist_ok=True)
+MAX_AGE_DAYS = int(env("MAX_AGE_DAYS", "7"))          # ignore reels older than this
+MAX_PER_SUBMISSION = int(env("MAX_PER_SUBMISSION", "8"))  # reels summarized per account per run
 
 STT_URL = f"{STT_BASE_URL}/audio/transcriptions"
 LLM_URL = f"{LLM_BASE_URL}/chat/completions"
@@ -70,6 +75,7 @@ class BotError(Exception):
 _db = sqlite3.connect(DATA_DIR / "bot.db", check_same_thread=False)
 _db.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, text TEXT, ts REAL)")
 _db.execute("CREATE TABLE IF NOT EXISTS prefs (user_id INTEGER PRIMARY KEY, lang TEXT)")
+_db.execute("CREATE TABLE IF NOT EXISTS seen_reels (code TEXT PRIMARY KEY, handle TEXT, caption TEXT, ts REAL)")
 _db.execute("CREATE TABLE IF NOT EXISTS ctx (user_id INTEGER PRIMARY KEY, code TEXT, caption TEXT, "
             "transcript TEXT, summary TEXT, ts REAL)")
 _db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, "
@@ -311,7 +317,7 @@ def fmt_duration(seconds: float | None) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
-async def process(code: str, url: str, lang: str, user_id: int = 0) -> str:
+async def process(code: str, url: str, lang: str, user_id: int = 0, meta: dict | None = None) -> str:
     key = f"v2:{code}:{lang}"
     cached = cache_get(key)
     if cached:
@@ -320,7 +326,8 @@ async def process(code: str, url: str, lang: str, user_id: int = 0) -> str:
             set_context(user_id, code, d["caption"], d["transcript"], d["body"])
         return d["result"]
     async with _job_lock:
-        meta = await asyncio.to_thread(fetch_meta, url)
+        if meta is None:
+            meta = await asyncio.to_thread(fetch_meta, url)
         duration = meta.get("duration") or 0
         if duration > MAX_REEL_SECONDS:
             raise BotError(f"This video is {fmt_duration(duration)} long; the limit is {fmt_duration(MAX_REEL_SECONDS)}.")
@@ -338,6 +345,107 @@ async def process(code: str, url: str, lang: str, user_id: int = 0) -> str:
     if user_id:
         set_context(user_id, code, caption, transcript, body)
     return result
+
+
+# --------------------------------------------------------------------------- radar (accounts)
+
+KEYWORD_RE = re.compile(r"comment\s+[\"“”']?([a-z0-9]+)", re.IGNORECASE)
+
+
+def norm_caption(text: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower())[:250]
+
+
+def is_duplicate(caption: str, others: list[str]) -> bool:
+    """Same account often posts the same script several times (A/B tests). Treat those as one."""
+    kw = KEYWORD_RE.search(caption or "")
+    n = norm_caption(caption)
+    for other in others:
+        k2 = KEYWORD_RE.search(other or "")
+        if kw and k2 and kw.group(1).lower() == k2.group(1).lower():
+            return True
+        if n and difflib.SequenceMatcher(None, n, norm_caption(other)).ratio() >= 0.6:
+            return True
+    return False
+
+
+async def process_submission(app: Application, path: Path) -> None:
+    """One inbox file = one account's new reel shortcodes. Summarize the fresh, distinct ones and send a digest."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    handle = re.sub(r"[^A-Za-z0-9._]", "", str(data.get("handle", "?")))[:30] or "?"
+    codes = [c for c in data.get("codes", []) if re.fullmatch(r"[A-Za-z0-9_-]{5,20}", str(c))][:30]
+    lang = get_lang(ALLOWED_USER_ID)
+    cutoff = time.time() - MAX_AGE_DAYS * 86400
+    results: list[str] = []
+    failures: list[str] = []
+    skipped_old = skipped_dup = 0
+    for code in codes:
+        if _db.execute("SELECT 1 FROM seen_reels WHERE code = ?", (code,)).fetchone():
+            continue
+        url = f"https://www.instagram.com/reel/{code}/"
+        try:
+            async with _job_lock:
+                meta = await asyncio.to_thread(fetch_meta, url)
+        except BotError as e:
+            failures.append(f"❌ {url}\n{e}")
+            continue
+        posted = meta.get("timestamp") or time.time()
+        caption = meta.get("description") or meta.get("title") or ""
+        recent = [r[0] for r in _db.execute(
+            "SELECT caption FROM seen_reels WHERE handle = ? AND ts > ?", (handle, cutoff)).fetchall()]
+        _db.execute("INSERT OR IGNORE INTO seen_reels (code, handle, caption, ts) VALUES (?,?,?,?)",
+                    (code, handle, caption, posted))
+        _db.commit()
+        if posted < cutoff:
+            skipped_old += 1
+            continue
+        if is_duplicate(caption, recent):
+            skipped_dup += 1
+            continue
+        if len(results) >= MAX_PER_SUBMISSION:
+            continue
+        try:
+            results.append(await process(code, url, lang, 0, meta))
+        except BotError as e:
+            failures.append(f"❌ {url}\n{e}")
+        await asyncio.sleep(2)  # be gentle with Instagram and the API
+    if not results and not failures:
+        log.info("Radar @%s: nothing new", handle)
+        return
+    head = f"📡 @{handle}: {len(results)} new reel(s)"
+    notes = []
+    if skipped_dup:
+        notes.append(f"{skipped_dup} near-duplicate")
+    if skipped_old:
+        notes.append(f"{skipped_old} older than {MAX_AGE_DAYS} days")
+    if notes:
+        head += " (skipped " + ", ".join(notes) + ")"
+    await app.bot.send_message(ALLOWED_USER_ID, head)
+    for text in results + failures:
+        for part in chunks(text):
+            await app.bot.send_message(ALLOWED_USER_ID, part)
+    if results:
+        await app.bot.send_message(ALLOWED_USER_ID, "Send me any reel link above to chat about it.")
+
+
+async def inbox_loop(app: Application) -> None:
+    while True:
+        try:
+            for path in sorted(INBOX.glob("*.json")):
+                try:
+                    await process_submission(app, path)
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    log.exception("Failed to process %s", path.name)
+                    path.rename(INBOX / "failed" / path.name)
+        except Exception:
+            log.exception("Inbox loop error")
+        await asyncio.sleep(30)
+
+
+async def post_init(app: Application) -> None:
+    if ALLOWED_USER_ID:
+        app.create_task(inbox_loop(app))
 
 
 # --------------------------------------------------------------------------- telegram
@@ -443,7 +551,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     if not ALLOWED_USER_ID:
         log.warning("ALLOWED_USER_ID is not set: setup mode. Send /id to the bot to get your ID.")
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("lang", cmd_lang))

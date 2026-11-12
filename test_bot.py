@@ -92,3 +92,34 @@ bot.set_context(42, "ZZZ", "c", "t", "s"); assert bot.get_history(42) == []
 r3 = asyncio.run(bot.process("AAA", "https://www.instagram.com/reel/AAA/", "fa", 42))
 assert r3 == r and bot.get_context(42)["code"] == "AAA"
 print("CHAT OK")
+
+# radar: inbox submission -> dedupe, age filter, digest
+assert bot.is_duplicate('Comment "47" and I send the setup', ['Comment "47" and I will DM you'])
+assert not bot.is_duplicate("Totally different caption about MCP servers", ['Comment "47" and I send the setup'])
+now = bot.time.time()
+metas = {
+    "RAD1AAAAA": {"timestamp": now - 3600, "description": 'Comment "47" and I\'ll send you the system', "uploader": "acct", "duration": 40},
+    "RAD2BBBBB": {"timestamp": now - 7200, "description": 'Comment "47" and I\'ll DM you the setup', "uploader": "acct", "duration": 40},
+    "RAD3CCCCC": {"timestamp": now - 30 * 86400, "description": "old reel from last month", "uploader": "acct", "duration": 30},
+    "RAD4DDDDD": {"timestamp": now - 86400, "description": "Claude Code now supports hooks for agents", "uploader": "acct", "duration": 50},
+}
+bot.fetch_meta = lambda url: metas[url.split("/reel/")[1].strip("/")]
+bot.transcribe = fake_tr
+async def fake_su2(c, t, l): return "radar summary"
+bot.summarize = fake_su2
+sent = []
+class FakeBot:
+    async def send_message(self, chat_id, text, **kw): sent.append((chat_id, text))
+class FakeApp: bot = FakeBot()
+sub = bot.INBOX / "t.json"
+sub.write_text(bot.json.dumps({"handle": "acct", "codes": list(metas)}), encoding="utf-8")
+asyncio.run(bot.process_submission(FakeApp(), sub))
+texts = [x[1] for x in sent]
+assert all(cid == 42 for cid, _ in sent)
+assert "2 new reel(s)" in texts[0] and "1 near-duplicate" in texts[0] and "1 older than" in texts[0], texts[0]
+assert sum("radar summary" in x for x in texts) == 2 and "RAD1AAAAA" in " ".join(texts) and "RAD4DDDDD" in " ".join(texts)
+assert "RAD2BBBBB" not in " ".join(texts) and "RAD3CCCCC" not in " ".join(texts)
+sent.clear()
+asyncio.run(bot.process_submission(FakeApp(), sub))   # same codes again -> nothing new, silent
+assert sent == [], sent
+print("RADAR OK")
